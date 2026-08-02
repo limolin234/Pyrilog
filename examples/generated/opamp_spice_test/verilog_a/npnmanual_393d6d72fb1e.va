@@ -1,0 +1,15 @@
+`include "constants.vams"
+`include "disciplines.vams"
+
+module npnmanual_393d6d72fb1e(collector, base, emitter);
+    inout collector, base, emitter;
+    electrical collector, base, emitter;
+    parameter real saturation_current = 1e-14;
+    parameter real forward_beta = 100;
+    localparam real thermal_voltage = 0.025850000000000001;
+
+    analog begin
+        I(collector, emitter) <+ (saturation_current * (exp(((V(base) - V(emitter)) / thermal_voltage)) - 1));
+        I(base, emitter) <+ ((saturation_current * (exp(((V(base) - V(emitter)) / thermal_voltage)) - 1)) / forward_beta);
+    end
+endmodule

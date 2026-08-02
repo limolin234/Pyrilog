@@ -1,8 +1,8 @@
-"""Full target syntax for the Pyrilog modeling language.
+"""Candidate target syntax for the Pyrilog modeling language.
 
-The current frontend can build this object graph and flatten electrical
-composites. Optical, thermal, controller scheduling, delay, output, and
-interactive-session lowering remain explicit backend capability boundaries.
+This example is reviewed before the frontend and compiler are updated.
+Optical, thermal, controller scheduling, delay, output, and interactive-session
+lowering remain explicit backend capability boundaries.
 """
 
 from pyrilog import *
@@ -25,12 +25,14 @@ class FirstOrderController(Device):
     drive = eport()
     time_constant = param(10 * ns, min=0 * ns)
     gain = 1.0
-    state = val(0 * V)
+    # A state is an internal dynamic scalar, not a topology node and has no KCL.
+    filtered_voltage = state(0 * V)
     relation = (
         sense.i == 0 * A,
         drive.i == 0 * A,
-        time_constant * ddt(state) + state == gain * sense.v,
-        drive.v == state,
+        time_constant * ddt(filtered_voltage) + filtered_voltage
+        == gain * sense.v,
+        drive.v == filtered_voltage,
     )
 
 
@@ -66,16 +68,30 @@ class Waveguide(Device):
     )
 
 
-# A thermal-capacitance C activates internal T/P and the optional TP port.
+# tnode(C=...) is a conservative thermal node with one temperature unknown.
+# C is required; C=0 * J / K creates an algebraic node without stored heat.
+# Its implicit balance is:
+#
+#   C * ddt(node.t) == node.p + sum(connected_port.p.o)
+#
+# node.p is the local power injected by relations owned by this device and
+# defaults to zero. T is optional and otherwise starts from the enclosing
+# circuit's AMBIENT value. Ideal node merging preserves every local C and p:
+#
+#   sum(C_k) * ddt(T) == sum(node_k.p) + sum(connected_port.p.o)
 class Ring(Device):
     input = oport()
     through = oport()
-    C = param(10 * uJ / K, min=1e-15 * J / K)
+    heat_capacity = param(10 * uJ / K, min=0 * J / K)
     radius = param(10 * um, min=0 * um)
     coupling = param(0.12, min=0.0, max=1.0)
     reference_wavelength = 1550 * nm
     reference_temperature = 300 * K
     thermal_phase_coefficient = 0 * rad / K
+
+    # A thermal node owns its temperature state and heat capacity. Its initial
+    # temperature defaults to system.AMBIENT unless T is given explicitly.
+    thermal = tnode(C=heat_capacity)
 
     relation = (
         through.o
@@ -84,7 +100,7 @@ class Ring(Device):
         * exp(
             -1j
             * thermal_phase_coefficient
-            * (T - reference_temperature)
+            * (thermal.t - reference_temperature)
         ),
         input.o
         == (1 - coupling) ** 0.5
@@ -92,9 +108,8 @@ class Ring(Device):
         * exp(
             -1j
             * thermal_phase_coefficient
-            * (T - reference_temperature)
+            * (thermal.t - reference_temperature)
         ),
-        P == 0 * W,
     )
 
 
@@ -105,26 +120,7 @@ class Photodiode(Device):
     responsivity = param(0.8 * A / W, min=0 * A / W)
     relation = (
         p.i + n.i == 0,
-        p.i.o == responsivity * optical.i.power,
-    )
-
-
-class ElectroThermalHeater(Device):
-    p = eport()
-    n = eport()
-    C = param(10 * uJ / K, min=1e-15 * J / K)
-    resistance = param(0.5 * kohm, min=1e-15 * ohm)
-    temperature_coefficient = 0 / K
-    reference_temperature = 300 * K
-    efficiency = param(0.9, min=0.0, max=1.0)
-
-    relation = (
-        p.i + n.i == 0,
-        p.v - n.v
-        == resistance
-        * (1 + temperature_coefficient * (T - reference_temperature))
-        * p.i.i,
-        P == efficiency * (p.v - n.v) * p.i.i,
+        p.o == responsivity * optical.i.power,
     )
 
 
@@ -133,8 +129,46 @@ class ThermalResistance(Device):
     b = tport()
     resistance = 20 * K / W
     relation = (
-        a.p + b.p == 0,
+        # Port power is positive into the thermal-resistance device.
+        a.p.i + b.p.i == 0,
         a.p.i == (a.t - b.t) / resistance,
+    )
+
+
+class ElectroThermalHeater(Device):
+    p = eport()
+    n = eport()
+    junction_heat_capacity = param(6 * uJ / K, min=0 * J / K)
+    case_heat_capacity = param(4 * uJ / K, min=0 * J / K)
+    junction_case_resistance = param(5 * K / W, min=1e-15 * K / W)
+    resistance = param(0.5 * kohm, min=1e-15 * ohm)
+    temperature_coefficient = 0 / K
+    reference_temperature = 300 * K
+    efficiency = param(0.9, min=0.0, max=1.0)
+
+    # One device or subcircuit may own any number of named thermal lumps.
+    junction = tnode(C=junction_heat_capacity)
+    case = tnode(C=case_heat_capacity)
+    junction_to_case = ThermalResistance(resistance=junction_case_resistance)
+
+    junction | junction_to_case.a
+    case | junction_to_case.b
+
+    relation = (
+        p.i + n.i == 0,
+        p.i
+        == (p.v - n.v)
+        / (
+            resistance
+            * (1 + temperature_coefficient * (junction.t - reference_temperature))
+        ),
+        junction.p
+        == efficiency
+        * (p.v - n.v) ** 2
+        / (
+            resistance
+            * (1 + temperature_coefficient * (junction.t - reference_temperature))
+        ),
     )
 
 
@@ -155,36 +189,50 @@ class RingChannel(Device):
     waveguide_loss = 2 * dB / cm
     heater_resistance = 0.5 * kohm
     heater_efficiency = param(0.9, min=0.0, max=1.0)
-    heater_heat_capacity = 10 * uJ / K
+    heater_junction_heat_capacity = 6 * uJ / K
+    heater_case_heat_capacity = 4 * uJ / K
     ring_heat_capacity = 10 * uJ / K
     heater_ring_resistance = 20 * K / W
     heater_ambient_resistance = 100 * K / W
     ring_ambient_resistance = 100 * K / W
 
     input_waveguide = Waveguide(length=100 * um, loss=waveguide_loss)
-    ring = Ring(radius=radius, coupling=coupling, C=ring_heat_capacity)
+    ring = Ring(
+        radius=radius,
+        coupling=coupling,
+        heat_capacity=ring_heat_capacity,
+    )
     output_waveguide = Waveguide(length=50 * um, loss=waveguide_loss)
     heater = ElectroThermalHeater(
         resistance=heater_resistance,
         efficiency=heater_efficiency,
-        C=heater_heat_capacity,
+        junction_heat_capacity=heater_junction_heat_capacity,
+        case_heat_capacity=heater_case_heat_capacity,
     )
     heater_to_ring = ThermalResistance(resistance=heater_ring_resistance)
     heater_to_ambient = ThermalResistance(resistance=heater_ambient_resistance)
     ring_to_ambient = ThermalResistance(resistance=ring_ambient_resistance)
 
-    opt_in | input_waveguide.input
-    input_waveguide.output | ring.input
-    ring.through | output_waveguide.input
-    output_waveguide.output | opt_out
+    # Optical nodes are named binary reference planes, not conservative
+    # multiport junctions. Splitters and combiners remain explicit devices.
+    input_reference = opt_in | input_waveguide.input
+    input_ring_reference = input_waveguide.output | ring.input
+    ring_output_reference = ring.through | output_waveguide.input
+    output_reference = output_waveguide.output | opt_out
 
+    # Electrical and thermal nodes are conservative multiport nodes. The two
+    # child thermal nodes already own C and T, so this composite only wires
+    # heat-flow devices between them; no thermal state is duplicated here.
     heater_drive = heater_p | heater.p
     heater_return = heater_n | heater.n
 
-    heater.TP |= (heater_to_ring.a, heater_to_ambient.a)
-    ring.TP |= (heater_to_ring.b, ring_to_ambient.a)
-    ambient_node = ambient | heater_to_ambient.b
-    ambient_node |= ring_to_ambient.b
+    # | accepts ports or nodes in any order. Every step returns the canonical
+    # node, so chains may contain any number of endpoints. A later |= extends
+    # the same equivalence class. Merging explicit nodes sums their local C and
+    # p contributions; incompatible explicit initial temperatures are rejected.
+    heater_case = heater.case | heater_to_ring.a | heater_to_ambient.a
+    ring_temperature = ring.thermal | heater_to_ring.b | ring_to_ambient.a
+    ambient_temperature = ambient | heater_to_ambient.b | ring_to_ambient.b
 
 
 # -----------------------------------------------------------------------------
@@ -198,13 +246,16 @@ class ReceiverController(Controller):
     hold = "zoh"
 
     drive = output(V)
-    previous_error = val(0 * V)
+    previous_error = state(0 * V)
 
     def step(self, measured_voltage):
         target_voltage = 0.6 * V
         bias = 1.2 * V
         gain = 0.1
-        return {"drive": bias + gain * (target_voltage - measured_voltage)}
+        error = target_voltage - measured_voltage
+        drive = bias + gain * (error + self.previous_error) / 2
+        self.previous_error = error
+        return {"drive": drive}
 
 
 # -----------------------------------------------------------------------------
@@ -233,8 +284,8 @@ with Circuit() as system:
 
     detector_output = detector.p | load.p
 
-    laser.out | channel.opt_in
-    channel.opt_out | detector.optical
+    laser_reference = laser.out | channel.opt_in
+    detector_reference = channel.opt_out | detector.optical
 
     # The call creates a typed output pack. Binding a named output records a
     # control dependency without pretending that it is a physical MNA node.
@@ -250,8 +301,10 @@ with Circuit() as system:
 observables = (
     drive.v.mV,
     detector_output.v.mV,
-    channel.ring.T.degC,
-    detector.p.i.o.mA,
+    channel.ring.thermal.t.degC,
+    channel.heater.junction.t.degC,
+    channel.heater.case.t.degC,
+    detector.p.o.mA,
     channel.opt_out.o.abs,
     channel.opt_out.o.power.mW,
     channel.opt_out.o.phase.deg,

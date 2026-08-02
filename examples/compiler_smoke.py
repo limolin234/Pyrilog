@@ -13,7 +13,7 @@ class Conductance(Device):
     conductance = 1e-3 * (A / V)
     relation = (
         p.i + n.i == 0,
-        p.i.i == conductance * (p.v - n.v),
+        p.i == conductance * (p.v - n.v),
     )
 
 

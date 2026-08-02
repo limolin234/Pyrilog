@@ -1,0 +1,13 @@
+`include "constants.vams"
+`include "disciplines.vams"
+
+module nonlinearamplifier_87c962b7890b(out_p, out_n, in_p, in_n);
+    inout out_p, out_n, in_p, in_n;
+    electrical out_p, out_n, in_p, in_n;
+    parameter real gain = 2;
+    parameter real cubic = 10;
+
+    analog begin
+        V(out_p, out_n) <+ ((gain * (V(in_p) - V(in_n))) + (cubic * pow((V(in_p) - V(in_n)), 3)));
+    end
+endmodule

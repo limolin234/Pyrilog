@@ -1,0 +1,18 @@
+{
+  "input_start_V": -0.2,
+  "input_stop_V": 0.2000000000000003,
+  "local_closed_loop_gain": 0.9433297531179542,
+  "local_transfer_monotonic": true,
+  "local_window_V": [
+    0.09,
+    0.11
+  ],
+  "maximum_local_tracking_error_V": 0.032722598904659075,
+  "operating_point_error_V": 0.0321526513370084,
+  "operating_point_input_V": 0.1000000000000002,
+  "operating_point_output_V": 0.1321526513370086,
+  "output_start_V": -0.1463184795285866,
+  "output_stop_V": 0.2267743971742616,
+  "points": 201,
+  "validation_scope": "relation-lowering DC smoke test; not a precision follower model"
+}

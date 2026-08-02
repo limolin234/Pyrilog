@@ -1,0 +1,431 @@
+{
+  "dev_directory": null,
+  "format": "pyrilog-compile-manifest-v1",
+  "instances": [
+    {
+      "backend_name": "V1",
+      "lowering": {
+        "kind": "native",
+        "primitive": "V",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "dc": {
+          "dimensions": [
+            [
+              "current",
+              -1.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": true,
+          "value_si": 5.0
+        }
+      },
+      "ports": {
+        "n": "0",
+        "p": "n1"
+      },
+      "source": "pyrilog.devices.VoltageSource",
+      "stable_id": "voltage_source_1"
+    },
+    {
+      "backend_name": "V2",
+      "lowering": {
+        "kind": "native",
+        "primitive": "V",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "dc": {
+          "dimensions": [
+            [
+              "current",
+              -1.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": true,
+          "value_si": -5.0
+        }
+      },
+      "ports": {
+        "n": "0",
+        "p": "n2"
+      },
+      "source": "pyrilog.devices.VoltageSource",
+      "stable_id": "voltage_source_2"
+    },
+    {
+      "backend_name": "V3",
+      "lowering": {
+        "kind": "native",
+        "primitive": "V",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "dc": {
+          "dimensions": [
+            [
+              "current",
+              -1.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": true,
+          "value_si": 0.0
+        }
+      },
+      "ports": {
+        "n": "0",
+        "p": "n8"
+      },
+      "source": "pyrilog.devices.VoltageSource",
+      "stable_id": "voltage_source_3"
+    },
+    {
+      "backend_name": "R1",
+      "lowering": {
+        "kind": "native",
+        "primitive": "R",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "resistance": {
+          "dimensions": [
+            [
+              "current",
+              -2.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": false,
+          "value_si": 10000.0
+        }
+      },
+      "ports": {
+        "n": "n3",
+        "p": "0"
+      },
+      "source": "pyrilog.devices.Resistor",
+      "stable_id": "resistor_1"
+    },
+    {
+      "backend_name": "R2",
+      "lowering": {
+        "kind": "native",
+        "primitive": "R",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "resistance": {
+          "dimensions": [
+            [
+              "current",
+              -2.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": false,
+          "value_si": 10000.0
+        }
+      },
+      "ports": {
+        "n": "n4",
+        "p": "0"
+      },
+      "source": "pyrilog.devices.Resistor",
+      "stable_id": "resistor_2"
+    },
+    {
+      "backend_name": "I1",
+      "lowering": {
+        "kind": "native",
+        "primitive": "I",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "dc": {
+          "dimensions": [
+            [
+              "current",
+              1.0
+            ]
+          ],
+          "external": true,
+          "value_si": 0.0002
+        }
+      },
+      "ports": {
+        "n": "n2",
+        "p": "n5"
+      },
+      "source": "pyrilog.devices.CurrentSource",
+      "stable_id": "current_source_1"
+    },
+    {
+      "backend_name": "Nn_p_n_manual_1",
+      "lowering": {
+        "kind": "verilog_a",
+        "module": "npnmanual_393d6d72fb1e",
+        "selection": "relation_fallback"
+      },
+      "model": "m_n_p_n_manual_1",
+      "parameters": {
+        "forward_beta": {
+          "dimensions": [],
+          "external": false,
+          "value_si": 100.0
+        },
+        "saturation_current": {
+          "dimensions": [
+            [
+              "current",
+              1.0
+            ]
+          ],
+          "external": false,
+          "value_si": 1e-14
+        }
+      },
+      "ports": {
+        "base": "n8",
+        "collector": "n3",
+        "emitter": "n5"
+      },
+      "source": "__main__.NPNManual",
+      "stable_id": "n_p_n_manual_1"
+    },
+    {
+      "backend_name": "Nn_p_n_manual_2",
+      "lowering": {
+        "kind": "verilog_a",
+        "module": "npnmanual_393d6d72fb1e",
+        "selection": "relation_fallback"
+      },
+      "model": "m_n_p_n_manual_2",
+      "parameters": {
+        "forward_beta": {
+          "dimensions": [],
+          "external": false,
+          "value_si": 100.0
+        },
+        "saturation_current": {
+          "dimensions": [
+            [
+              "current",
+              1.0
+            ]
+          ],
+          "external": false,
+          "value_si": 1e-14
+        }
+      },
+      "ports": {
+        "base": "n7",
+        "collector": "n4",
+        "emitter": "n5"
+      },
+      "source": "__main__.NPNManual",
+      "stable_id": "n_p_n_manual_2"
+    },
+    {
+      "backend_name": "Nn_p_n_manual_3",
+      "lowering": {
+        "kind": "verilog_a",
+        "module": "npnmanual_393d6d72fb1e",
+        "selection": "relation_fallback"
+      },
+      "model": "m_n_p_n_manual_3",
+      "parameters": {
+        "forward_beta": {
+          "dimensions": [],
+          "external": false,
+          "value_si": 1000.0
+        },
+        "saturation_current": {
+          "dimensions": [
+            [
+              "current",
+              1.0
+            ]
+          ],
+          "external": false,
+          "value_si": 1e-14
+        }
+      },
+      "ports": {
+        "base": "n3",
+        "collector": "n7",
+        "emitter": "n6"
+      },
+      "source": "__main__.NPNManual",
+      "stable_id": "n_p_n_manual_3"
+    },
+    {
+      "backend_name": "R3",
+      "lowering": {
+        "kind": "native",
+        "primitive": "R",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "resistance": {
+          "dimensions": [
+            [
+              "current",
+              -2.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": false,
+          "value_si": 1000.0
+        }
+      },
+      "ports": {
+        "n": "n2",
+        "p": "n6"
+      },
+      "source": "pyrilog.devices.Resistor",
+      "stable_id": "resistor_3"
+    },
+    {
+      "backend_name": "R4",
+      "lowering": {
+        "kind": "native",
+        "primitive": "R",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "resistance": {
+          "dimensions": [
+            [
+              "current",
+              -2.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": false,
+          "value_si": 1272.0
+        }
+      },
+      "ports": {
+        "n": "n7",
+        "p": "n1"
+      },
+      "source": "pyrilog.devices.Resistor",
+      "stable_id": "resistor_4"
+    }
+  ],
+  "models": [
+    {
+      "module": "npnmanual_393d6d72fb1e",
+      "osdi": "examples/generated/opamp_spice_test/verilog_a/npnmanual_393d6d72fb1e.osdi",
+      "source": "examples/generated/opamp_spice_test/verilog_a/npnmanual_393d6d72fb1e.va",
+      "source_sha256": "c26e643d32936861bb8bbffa831e85792cdddee4f321591fb4c837c874293664"
+    }
+  ],
+  "netlist": "examples/generated/opamp_spice_test/compiled.cir",
+  "nodes": {
+    "0": "0",
+    "electrical_node_1": "n1",
+    "electrical_node_2": "n2",
+    "electrical_node_3": "n3",
+    "electrical_node_4": "n4",
+    "electrical_node_5": "n5",
+    "electrical_node_6": "n6",
+    "electrical_node_7": "n7",
+    "electrical_node_8": "n8"
+  },
+  "required_capabilities": [
+    "real_relations",
+    "verilog_a_osdi"
+  ],
+  "simulator": "ngspice",
+  "thermal_lumps": []
+}

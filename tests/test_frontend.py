@@ -12,13 +12,16 @@ import pint
 import pyrilog
 
 from pyrilog import BackendCapabilityError, Circuit, Device
-from pyrilog import ddt, enode, eport, external, internal, oport, param
+from pyrilog import ddt, enode, eport, external, internal, localparam, oport, param
 from pyrilog import tnode, tport, u, val
 from pyrilog.control import Controller, output
 from pyrilog.devices import Capacitor as SpiceCapacitor
 from pyrilog.devices import CurrentSource as SpiceCurrentSource
 from pyrilog.devices import Inductor as SpiceInductor
+from pyrilog.devices import NPN as SpiceNPN
 from pyrilog.devices import Resistor as SpiceResistor
+from pyrilog.devices import VoltageControlledCurrentSource as SpiceVCCS
+from pyrilog.devices import VoltageControlledVoltageSource as SpiceVCVS
 from pyrilog.devices import VoltageSource as SpiceVoltageSource
 from pyrilog.simulation import CompilationError, OperatingPoint, Output, Spice, Transient
 from pyrilog.model import FlowQuantity, InternalSymbol, Node, NodeQuantity
@@ -44,7 +47,7 @@ class Resistor(Device):
     resistance = param(1 * kohm, min=0 * ohm)
     relation = (
         p.i + n.i == 0,
-        p.v - n.v == resistance * p.i.i,
+        p.v - n.v == resistance * p.i,
     )
 
 
@@ -54,7 +57,7 @@ class Conductance(Device):
     conductance = param(1e-3 * (A / V), min=0 * (A / V))
     relation = (
         p.i + n.i == 0,
-        p.i.i == conductance * (p.v - n.v),
+        p.i == conductance * (p.v - n.v),
     )
 
 
@@ -64,7 +67,7 @@ class OutwardConductance(Device):
     conductance = param(1e-3 * (A / V), min=0 * (A / V))
     relation = (
         p.i + n.i == 0,
-        p.i.o == -conductance * (p.v - n.v),
+        p.o == -conductance * (p.v - n.v),
     )
 
 
@@ -110,6 +113,15 @@ class DividerSection(Device):
     second.n | n
 
 
+class LocalParamSection(Device):
+    p = eport()
+    n = eport()
+    half_resistance = localparam(1 * kohm)
+    load = Resistor(resistance=2 * half_resistance)
+    p | load.p
+    load.n | n
+
+
 class ShortThrough(Device):
     p = eport()
     n = eport()
@@ -139,7 +151,7 @@ class ParallelSection(Device):
     load.n | n
     relation = (
         p.i + n.i == 0,
-        p.i.i == conductance * (p.v - n.v),
+        p.i == conductance * (p.v - n.v),
     )
 
 
@@ -160,8 +172,9 @@ class OpticalEndpoint(Device):
 
 class ThermalBody(Device):
     electrical = eport()
-    C = 10 * u.uJ / u.K
-    relation = P == 0 * u.W
+    heat_capacity = 10 * u.uJ / u.K
+    thermal = tnode(C=heat_capacity)
+    relation = thermal.p == 0 * u.W
 
 
 class ElectricalCapacitanceName(Device):
@@ -175,7 +188,7 @@ class ThermalLink(Device):
     b = tport()
     resistance = 20 * u.K / u.W
     relation = (
-        a.p + b.p == 0,
+        a.p.i + b.p.i == 0,
         a.p.i == (a.t - b.t) / resistance,
     )
 
@@ -218,7 +231,7 @@ def read_raw_point(path: Path) -> dict[str, float]:
 
 class FrontendTests(unittest.TestCase):
     def test_pyrilog_public_package_version(self):
-        self.assertEqual(pyrilog.__version__, "1.0.0")
+        self.assertEqual(pyrilog.__version__, "1.1.0")
         self.assertNotIn("Controller", pyrilog.__all__)
         self.assertNotIn("Spice", pyrilog.__all__)
         self.assertFalse(hasattr(pyrilog, "Controller"))
@@ -271,19 +284,19 @@ class FrontendTests(unittest.TestCase):
 
         with Circuit() as wrong_domain:
             source = VoltageSource()
-            with self.assertRaisesRegex(TopologyError, "electrical port to thermal node"):
+            with self.assertRaisesRegex(TopologyError, "different physical domains"):
                 wrong_domain.AMBIENT |= source.p
         self.assertNotIn("AMBIENT", wrong_domain.graph.members)
         self.assertFalse(wrong_domain.graph.nodes)
 
         with Circuit() as occupied_port:
             link = ThermalLink()
-            thermal = tnode()
+            thermal = tnode(C=0 * u.J / u.K)
             thermal |= link.a
-            with self.assertRaisesRegex(TopologyError, "already connected"):
-                occupied_port.AMBIENT |= link.a
-        self.assertNotIn("AMBIENT", occupied_port.graph.members)
-        self.assertNotIn(occupied_port.AMBIENT, occupied_port.graph.nodes)
+            occupied_port.AMBIENT |= link.a
+        self.assertIn("AMBIENT", occupied_port.graph.members)
+        self.assertIs(thermal.canonical(), occupied_port.AMBIENT)
+        self.assertIs(link.a.connection, occupied_port.AMBIENT)
 
         with Circuit() as compiled:
             source = VoltageSource(dc=1 * V)
@@ -302,7 +315,7 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("AMBIENT", compiled.graph.members)
 
     def test_ordinary_thermal_node_temperature_is_read_only(self):
-        node = tnode()
+        node = tnode(C=0 * u.J / u.K)
         with self.assertRaises(AttributeError):
             node.t = 315 * u.K
 
@@ -310,6 +323,34 @@ class FrontendTests(unittest.TestCase):
         self.assertIsInstance(Resistor.__dict__["resistance"], ParameterSymbol)
         self.assertEqual(tuple(Resistor._parameter_symbols), ("resistance",))
         self.assertEqual(len(Resistor._relations), 2)
+
+    def test_localparam_is_reflected_read_only_and_not_configurable(self):
+        class LocalVoltage(Device):
+            p = eport()
+            n = eport()
+            offset = localparam(0.5 * V)
+            relation = (p.i + n.i == 0, p.v - n.v == offset)
+
+        self.assertEqual(tuple(LocalVoltage._parameter_symbols), ())
+        self.assertEqual(tuple(LocalVoltage._local_parameter_symbols), ("offset",))
+        device = LocalVoltage()
+        self.assertEqual(device.offset, 0.5 * V)
+        with self.assertRaisesRegex(ParameterError, "cannot be overridden"):
+            LocalVoltage(offset=1 * V)
+        with self.assertRaisesRegex(ParameterError, "read-only"):
+            device.offset = 1 * V
+        with self.assertRaisesRegex(ParameterError, "read-only"):
+            LocalVoltage.offset = 1 * V
+        with self.assertRaisesRegex(ParameterError, "read-only"):
+            del LocalVoltage.offset
+        with self.assertRaisesRegex(ParameterError, "inherited localparams"):
+            class InvalidOverride(LocalVoltage):
+                offset = 1 * V
+
+    def test_localparam_can_bind_composite_child_parameter(self):
+        with Circuit():
+            section = LocalParamSection()
+        self.assertEqual(section.load.resistance.value, 2 * kohm)
 
     def test_composite_instances_own_independent_hierarchies(self):
         with Circuit() as circuit:
@@ -363,11 +404,21 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("revision", MetadataOnly._parameter_symbols)
 
     def test_flow_direction_views_are_signed_aliases(self):
-        current = Resistor.__dict__["p"].i
-        self.assertIsInstance(current, FlowQuantity)
-        self.assertIs(current.o, current)
-        self.assertIsInstance(current.i, UnaryExpr)
-        self.assertIs(current.i.operand, current)
+        with Circuit() as circuit:
+            resistor = Resistor()
+        for port in (Resistor.__dict__["p"], resistor.p):
+            with self.subTest(port=port):
+                incoming = port.i
+                outgoing = port.o
+                self.assertIsInstance(incoming, FlowQuantity)
+                self.assertIsInstance(outgoing, UnaryExpr)
+                self.assertIsInstance(outgoing.operand, FlowQuantity)
+                self.assertIs(outgoing.operand.port, port)
+                self.assertEqual(outgoing.operand.quantity, "i")
+                with self.assertRaises(AttributeError):
+                    _ = incoming.i
+                with self.assertRaises(AttributeError):
+                    _ = incoming.o
 
     def test_optical_input_and_output_remain_independent_quantities(self):
         optical = OpticalEndpoint.__dict__["optical"]
@@ -379,39 +430,27 @@ class FrontendTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             _ = incoming.o
 
-    def test_thermal_capacity_injects_internal_state_and_port(self):
-        self.assertEqual(tuple(ThermalBody._parameter_symbols), ("C",))
-        self.assertEqual(tuple(ThermalBody._internal_symbols), ("T", "P"))
-        self.assertEqual(tuple(ThermalBody._port_templates), ("electrical", "TP"))
-        self.assertEqual(ThermalBody._internal_symbols["T"].spec.initial, 300 * u.K)
-        body = ThermalBody(T=25 * u.degC)
-        self.assertEqual(body.T.initial, 298.15 * u.K)
-        self.assertEqual(body.TP.t.quantity, "t")
-        self.assertEqual(body.TP.p.quantity, "p")
+    def test_thermal_capacity_is_owned_by_named_node(self):
+        self.assertEqual(tuple(ThermalBody._parameter_symbols), ("heat_capacity",))
+        self.assertEqual(tuple(ThermalBody._internal_symbols), ())
+        self.assertEqual(tuple(ThermalBody._port_templates), ("electrical",))
+        with Circuit():
+            body = ThermalBody(heat_capacity=12 * u.uJ / u.K)
+        self.assertEqual(body.thermal.C, 12 * u.uJ / u.K)
+        self.assertEqual(body.thermal.t.quantity, "t")
+        self.assertEqual(body.thermal.p.quantity, "p")
 
     def test_electrical_capacitance_named_C_does_not_enable_thermal_state(self):
         self.assertEqual(tuple(ElectricalCapacitanceName._internal_symbols), ())
         self.assertNotIn("TP", ElectricalCapacitanceName._port_templates)
 
-    def test_final_C_schema_controls_inherited_thermal_elements(self):
-        class ElectricalOverride(ThermalBody):
-            C = 5 * u.pF
+    def test_heat_capacity_parameter_does_not_create_implicit_thermal_elements(self):
+        class ExplicitOnly(Device):
+            C = 1 * u.J / u.K
 
-        self.assertNotIn("T", ElectricalOverride._internal_symbols)
-        self.assertNotIn("P", ElectricalOverride._internal_symbols)
-        self.assertNotIn("TP", ElectricalOverride._port_templates)
-        self.assertEqual(len(ElectricalOverride._relations), 0)
-
-    def test_automatic_thermal_names_are_reserved(self):
-        with self.assertRaisesRegex(TypeError, "TP is reserved"):
-            class ExplicitPortBeforeCapacity(Device):
-                TP = tport()
-                C = 1 * u.J / u.K
-
-        with self.assertRaisesRegex(TypeError, "T is reserved"):
-            class ExplicitTemperatureAfterCapacity(Device):
-                C = 1 * u.J / u.K
-                T = internal(300 * u.K)
+        self.assertEqual(tuple(ExplicitOnly._internal_symbols), ())
+        self.assertEqual(tuple(ExplicitOnly._port_templates), ())
+        self.assertFalse(ExplicitOnly._definition.nodes)
 
     def test_symbolic_parameter_binding_checks_declared_dimensions(self):
         class SourceParameters(Device):
@@ -419,9 +458,11 @@ class FrontendTests(unittest.TestCase):
             heat_capacity = 2 * u.J / u.K
 
         with self.assertRaisesRegex(ParameterError, "incompatible dimensions"):
-            ThermalBody(C=SourceParameters.voltage)
-        body = ThermalBody(C=SourceParameters.heat_capacity)
-        self.assertIs(body._parameter_values["C"], SourceParameters.heat_capacity)
+            ThermalBody(heat_capacity=SourceParameters.voltage)
+        body = ThermalBody(heat_capacity=SourceParameters.heat_capacity)
+        self.assertIs(
+            body._parameter_values["heat_capacity"], SourceParameters.heat_capacity
+        )
 
     def test_explicit_thermal_link_does_not_need_C(self):
         self.assertEqual(tuple(ThermalLink._port_templates), ("a", "b"))
@@ -435,9 +476,9 @@ class FrontendTests(unittest.TestCase):
         with self.assertRaisesRegex(ParameterError, "heat-capacity"):
             tnode(C=1 * u.pF)
         with self.assertRaisesRegex(ParameterError, "temperature"):
-            tnode(T=1 * u.V)
+            tnode(C=0 * u.J / u.K, T=1 * u.V)
         with self.assertRaisesRegex(ParameterError, "power"):
-            tnode(P=1 * u.V)
+            tnode(C=0 * u.J / u.K, P=1 * u.V)
 
     def test_val_is_the_short_form_for_internal(self):
         self.assertIs(val, internal)
@@ -648,15 +689,15 @@ class FrontendTests(unittest.TestCase):
                     Spice(netlist=Path(directory) / "incomplete.sp", verilog_a_dir=Path(directory) / "va")
                 )
 
-    def test_ambient_temperature_is_used_for_implicit_initial_state(self):
+    def test_ambient_temperature_is_used_for_thermal_node_initial_state(self):
         with Circuit() as circuit:
             body = ThermalBody()
         circuit.ambient_temperature = 310 * u.K
-        self.assertEqual(body.T.initial, 310 * u.K)
+        self.assertEqual(body.thermal.initial_temperature, 310 * u.K)
 
     def test_explicit_initial_temperature_must_have_temperature_dimensions(self):
-        with self.assertRaisesRegex(ParameterError, "initial T"):
-            ThermalBody(T=1 * V)
+        with self.assertRaisesRegex(ParameterError, "temperature"):
+            tnode(C=1 * u.J / u.K, T=1 * V)
 
     def test_pint_namespace_supports_offset_log_complex_and_fractional_units(self):
         self.assertEqual((25 * u.degC).to(u.K), 298.15 * u.K)
@@ -730,7 +771,7 @@ class FrontendTests(unittest.TestCase):
             node = local.p | local.n
         with Circuit() as second:
             foreign = Resistor()
-        with self.assertRaisesRegex(TopologyError, "different graphs"):
+        with self.assertRaisesRegex(TopologyError, "different or unregistered graphs"):
             node |= foreign.p
         self.assertIsNone(foreign.p.connection)
         self.assertEqual(second.graph.stage, "INSTANCE")
@@ -740,7 +781,7 @@ class FrontendTests(unittest.TestCase):
             electrical = Resistor()
             optical = OpticalEndpoint()
             node = enode()
-            with self.assertRaisesRegex(TopologyError, "cannot connect optical"):
+            with self.assertRaisesRegex(TopologyError, "different physical domains"):
                 node |= (electrical.p, optical.optical)
         self.assertEqual(circuit.graph.stage, "INSTANCE")
         self.assertIsNone(electrical.p.connection)
@@ -859,12 +900,100 @@ class CompilerTests(unittest.TestCase):
             point = read_raw_point(compiled.run(OperatingPoint()).raw_file)
             self.assertAlmostEqual(point["v(n1)"], -1.0)
 
+    def test_controlled_sources_emit_ordered_native_ports_and_run(self):
+        with Circuit() as circuit:
+            input_source = SpiceVoltageSource(dc=0.2 * V)
+            vcvs = SpiceVCVS(gain=5.0)
+            vccs = SpiceVCCS(transconductance=2 * u.mS)
+            voltage_load = SpiceResistor(resistance=1 * kohm)
+            current_load = SpiceResistor(resistance=1 * kohm)
+            input_node = enode()
+            input_node |= (input_source.p, vcvs.cp, vccs.cp)
+            voltage_output = enode()
+            voltage_output |= (vcvs.p, voltage_load.p)
+            current_output = enode()
+            current_output |= (vccs.p, current_load.p)
+            ground = enode(reference=True)
+            ground |= (
+                input_source.n,
+                vcvs.n,
+                vcvs.cn,
+                vccs.n,
+                vccs.cn,
+                voltage_load.n,
+                current_load.n,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compiled = circuit.compile(
+                Spice(netlist=root / "controlled.sp", verilog_a_dir=root / "va")
+            )
+            netlist = compiled.netlist.read_text(encoding="ascii")
+            self.assertRegex(netlist, r"E1 n\d+ 0 n\d+ 0 5")
+            self.assertRegex(netlist, r"G1 n\d+ 0 n\d+ 0 0\.002")
+            manifest = json.loads(compiled.manifest.read_text(encoding="ascii"))
+            instances = {item["backend_name"]: item for item in manifest["instances"]}
+            self.assertEqual(set(instances["E1"]["ports"]), {"p", "n", "cp", "cn"})
+            self.assertEqual(set(instances["G1"]["ports"]), {"p", "n", "cp", "cn"})
+            point = read_raw_point(compiled.run(OperatingPoint()).raw_file)
+            voltage_node = instances["E1"]["ports"]["p"]
+            current_node = instances["G1"]["ports"]["p"]
+            self.assertAlmostEqual(point[f"v({voltage_node})"], 1.0)
+            self.assertAlmostEqual(point[f"v({current_node})"], -0.4)
+
+    def test_native_npn_emits_model_card_and_runs_bias_point(self):
+        with Circuit() as circuit:
+            supply = SpiceVoltageSource(dc=5 * V)
+            bias = SpiceVoltageSource(dc=0.7 * V)
+            collector_load = SpiceResistor(resistance=1 * kohm)
+            transistor = SpiceNPN(forward_beta=120.0)
+            supply_node = enode()
+            supply_node |= (supply.p, collector_load.p)
+            collector_node = enode()
+            collector_node |= (collector_load.n, transistor.collector)
+            base_node = enode()
+            base_node |= (bias.p, transistor.base)
+            ground = enode(reference=True)
+            ground |= (supply.n, bias.n, transistor.emitter)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compiled = circuit.compile(
+                Spice(netlist=root / "npn.sp", verilog_a_dir=root / "va")
+            )
+            netlist = compiled.netlist.read_text(encoding="ascii")
+            self.assertRegex(netlist, r"Q1 n\d+ n\d+ 0 m_n_p_n_1")
+            self.assertIn(".model m_n_p_n_1 NPN (IS=1e-14 BF=120 BR=1 VAF=100)", netlist)
+            manifest = json.loads(compiled.manifest.read_text(encoding="ascii"))
+            instance = next(item for item in manifest["instances"] if item["backend_name"] == "Q1")
+            self.assertEqual(set(instance["ports"]), {"collector", "base", "emitter"})
+            self.assertEqual(instance["lowering"]["model_type"], "NPN")
+            point = read_raw_point(compiled.run(OperatingPoint()).raw_file)
+            collector_backend = instance["ports"]["collector"]
+            self.assertGreater(point[f"v({collector_backend})"], 0.0)
+            self.assertLess(point[f"v({collector_backend})"], 5.0)
+
+    def test_native_npn_model_values_must_be_positive_and_finite(self):
+        with Circuit() as circuit:
+            transistor = SpiceNPN(forward_beta=0.0)
+            ground = enode(reference=True)
+            ground |= (transistor.collector, transistor.base, transistor.emitter)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(CompilationError, "SPICE Q forward_beta"):
+                circuit.compile(
+                    Spice(
+                        netlist=Path(directory) / "invalid_npn.sp",
+                        verilog_a_dir=Path(directory) / "va",
+                    )
+                )
+
     def test_standard_primitive_metadata_is_not_inherited_silently(self):
         class NonlinearResistor(SpiceResistor):
             nonlinear_coefficient = 1e-3 / V**2
             relation = (
                 SpiceResistor.p.i + SpiceResistor.n.i == 0,
-                SpiceResistor.p.i.i
+                SpiceResistor.p.i
                 == (SpiceResistor.p.v - SpiceResistor.n.v) / SpiceResistor.resistance
                 + nonlinear_coefficient
                 * (SpiceResistor.p.v - SpiceResistor.n.v) ** 3
@@ -1051,7 +1180,7 @@ class CompilerTests(unittest.TestCase):
                 conductance = 1e-3 * (A / V)
                 relation = (
                     p.i + n.i == 0,
-                    p.i.i == multiplier * conductance * (p.v - n.v),
+                    p.i == multiplier * conductance * (p.v - n.v),
                 )
 
             return Load
@@ -1116,7 +1245,7 @@ class CompilerTests(unittest.TestCase):
             with self.assertRaisesRegex(BackendCapabilityError, "CSV reconstruction"):
                 compiled.run(OperatingPoint(), output=Output(output_node.v))
 
-    def test_unsupported_optical_and_thermal_lowering_fail_explicitly(self):
+    def test_unsupported_optical_lowering_fails_explicitly(self):
         with Circuit() as optical_circuit:
             left = OpticalEndpoint()
             right = OpticalEndpoint()
@@ -1127,18 +1256,6 @@ class CompilerTests(unittest.TestCase):
                     Spice(netlist=Path(directory) / "optical.sp", verilog_a_dir=Path(directory) / "va")
                 )
 
-        with Circuit() as thermal_circuit:
-            link = ThermalLink()
-            hot = tnode()
-            cold = tnode(fixed=True)
-            hot |= link.a
-            cold |= link.b
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(BackendCapabilityError, "thermal node"):
-                thermal_circuit.compile(
-                    Spice(netlist=Path(directory) / "thermal.sp", verilog_a_dir=Path(directory) / "va")
-                )
-
     def test_nonlinear_charge_ddt_lowers_to_verilog_a_and_runs_transient(self):
         class NonlinearCharge(Device):
             p = eport()
@@ -1147,7 +1264,7 @@ class CompilerTests(unittest.TestCase):
             nonlinear_capacitance = 0.1 * u.pF / V
             relation = (
                 p.i + n.i == 0,
-                p.i.i
+                p.i
                 == ddt(
                     capacitance * (p.v - n.v)
                     + nonlinear_capacitance * (p.v - n.v) ** 2
@@ -1179,7 +1296,7 @@ class CompilerTests(unittest.TestCase):
             capacitance = 1 * u.nF
             relation = (
                 p.i + n.i == 0,
-                p.i.i == ddt(capacitance * (p.v - n.v)),
+                p.i == ddt(capacitance * (p.v - n.v)),
             )
 
         with Circuit() as circuit:
@@ -1307,7 +1424,7 @@ class CompilerTests(unittest.TestCase):
             p = eport()
             n = eport()
             conductance = 1e-3 * (A / V)
-            relation = p.i.i == conductance * (p.v - n.v)
+            relation = p.i == conductance * (p.v - n.v)
 
         circuit, _, _, _ = voltage_divider(MissingConservation)
         with tempfile.TemporaryDirectory() as directory:
@@ -1324,7 +1441,7 @@ class CompilerTests(unittest.TestCase):
             gain_a = 2e-3 * (A / V)
             relation = (
                 p.i + n.i == 0,
-                p.i.i == (gain_A + gain_a) * (p.v - n.v),
+                p.i == (gain_A + gain_a) * (p.v - n.v),
             )
 
         circuit, _, _, _ = voltage_divider(CollidingParameters)
@@ -1341,7 +1458,7 @@ class CompilerTests(unittest.TestCase):
             conductance = 1e-3 * (A / V)
             relation = (
                 p.i + n.i == 0,
-                p.i.i == conductance * (p.v - n.v),
+                p.i == conductance * (p.v - n.v),
             )
 
         for value, message in (
@@ -1367,7 +1484,7 @@ class CompilerTests(unittest.TestCase):
             conductance = float("nan") * (A / V)
             relation = (
                 p.i + n.i == 0,
-                p.i.i == conductance * (p.v - n.v),
+                p.i == conductance * (p.v - n.v),
             )
 
         circuit, _, _, _ = voltage_divider(
@@ -1388,7 +1505,7 @@ class CompilerTests(unittest.TestCase):
             n = eport()
             relation = (
                 p.i + n.i == 0,
-                p.i.i == 0 * V,
+                p.i == 0 * V,
             )
 
         circuit, _, _, _ = voltage_divider(BadZero)

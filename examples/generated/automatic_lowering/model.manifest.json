@@ -1,0 +1,282 @@
+{
+  "dev_directory": null,
+  "format": "pyrilog-compile-manifest-v1",
+  "instances": [
+    {
+      "backend_name": "V1",
+      "lowering": {
+        "kind": "native",
+        "primitive": "V",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "dc": {
+          "dimensions": [
+            [
+              "current",
+              -1.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": true,
+          "value_si": 0.1
+        }
+      },
+      "ports": {
+        "n": "0",
+        "p": "n1"
+      },
+      "source": "pyrilog.devices.VoltageSource",
+      "stable_id": "voltage_source_1"
+    },
+    {
+      "backend_name": "E1",
+      "lowering": {
+        "kind": "native",
+        "primitive": "E",
+        "selection": "relation_match"
+      },
+      "model": null,
+      "parameters": {
+        "gain": {
+          "dimensions": [],
+          "external": false,
+          "value_si": 3.0
+        }
+      },
+      "ports": {
+        "in_n": "0",
+        "in_p": "n1",
+        "out_n": "0",
+        "out_p": "n2"
+      },
+      "source": "__main__.LinearAmplifier",
+      "stable_id": "linear_amplifier_1"
+    },
+    {
+      "backend_name": "Nnonlinear_amplifier_1",
+      "lowering": {
+        "kind": "verilog_a",
+        "module": "nonlinearamplifier_87c962b7890b",
+        "selection": "relation_fallback"
+      },
+      "model": "m_nonlinear_amplifier_1",
+      "parameters": {
+        "cubic": {
+          "dimensions": [
+            [
+              "current",
+              2.0
+            ],
+            [
+              "length",
+              -4.0
+            ],
+            [
+              "mass",
+              -2.0
+            ],
+            [
+              "time",
+              6.0
+            ]
+          ],
+          "external": false,
+          "value_si": 10.0
+        },
+        "gain": {
+          "dimensions": [],
+          "external": false,
+          "value_si": 2.0
+        }
+      },
+      "ports": {
+        "in_n": "0",
+        "in_p": "n1",
+        "out_n": "0",
+        "out_p": "n3"
+      },
+      "source": "__main__.NonlinearAmplifier",
+      "stable_id": "nonlinear_amplifier_1"
+    },
+    {
+      "backend_name": "Nnonlinear_charge_1",
+      "lowering": {
+        "kind": "verilog_a",
+        "module": "nonlinearcharge_5c907fa19990",
+        "selection": "relation_fallback"
+      },
+      "model": "m_nonlinear_charge_1",
+      "parameters": {
+        "capacitance": {
+          "dimensions": [
+            [
+              "current",
+              2.0
+            ],
+            [
+              "length",
+              -2.0
+            ],
+            [
+              "mass",
+              -1.0
+            ],
+            [
+              "time",
+              4.0
+            ]
+          ],
+          "external": false,
+          "value_si": 1e-12
+        },
+        "nonlinear_capacitance": {
+          "dimensions": [
+            [
+              "current",
+              3.0
+            ],
+            [
+              "length",
+              -4.0
+            ],
+            [
+              "mass",
+              -2.0
+            ],
+            [
+              "time",
+              7.0
+            ]
+          ],
+          "external": false,
+          "value_si": 1e-13
+        }
+      },
+      "ports": {
+        "n": "0",
+        "p": "n1"
+      },
+      "source": "__main__.NonlinearCharge",
+      "stable_id": "nonlinear_charge_1"
+    },
+    {
+      "backend_name": "R1",
+      "lowering": {
+        "kind": "native",
+        "primitive": "R",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "resistance": {
+          "dimensions": [
+            [
+              "current",
+              -2.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": false,
+          "value_si": 1000.0
+        }
+      },
+      "ports": {
+        "n": "0",
+        "p": "n2"
+      },
+      "source": "pyrilog.devices.Resistor",
+      "stable_id": "resistor_1"
+    },
+    {
+      "backend_name": "R2",
+      "lowering": {
+        "kind": "native",
+        "primitive": "R",
+        "selection": "explicit_metadata"
+      },
+      "model": null,
+      "parameters": {
+        "resistance": {
+          "dimensions": [
+            [
+              "current",
+              -2.0
+            ],
+            [
+              "length",
+              2.0
+            ],
+            [
+              "mass",
+              1.0
+            ],
+            [
+              "time",
+              -3.0
+            ]
+          ],
+          "external": false,
+          "value_si": 1000.0
+        }
+      },
+      "ports": {
+        "n": "0",
+        "p": "n3"
+      },
+      "source": "pyrilog.devices.Resistor",
+      "stable_id": "resistor_2"
+    }
+  ],
+  "models": [
+    {
+      "module": "nonlinearamplifier_87c962b7890b",
+      "osdi": "examples/generated/automatic_lowering/verilog_a/nonlinearamplifier_87c962b7890b.osdi",
+      "source": "examples/generated/automatic_lowering/verilog_a/nonlinearamplifier_87c962b7890b.va",
+      "source_sha256": "b6e7b1804e1374d78057f0b7bb2ded2c57463b9054b652457afd42f8d269db2e"
+    },
+    {
+      "module": "nonlinearcharge_5c907fa19990",
+      "osdi": "examples/generated/automatic_lowering/verilog_a/nonlinearcharge_5c907fa19990.osdi",
+      "source": "examples/generated/automatic_lowering/verilog_a/nonlinearcharge_5c907fa19990.va",
+      "source_sha256": "d34d286f61fc39cc186ad2c80f4cd9d72885ff6e92f73b872cd3b21c425abc95"
+    }
+  ],
+  "netlist": "examples/generated/automatic_lowering/model.sp",
+  "nodes": {
+    "0": "0",
+    "electrical_node_1": "n1",
+    "electrical_node_2": "n2",
+    "electrical_node_3": "n3"
+  },
+  "required_capabilities": [
+    "real_relations",
+    "verilog_a_osdi",
+    "verilog_a_ddt"
+  ],
+  "simulator": "ngspice",
+  "thermal_lumps": []
+}

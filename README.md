@@ -1,29 +1,41 @@
-# Pyrilog 1.0.0
+# Pyrilog 1.1.0
 
-Pyrilog 是一个以 Python 为宿主语言的关系式电路建模前端。用户使用类定义
-器件的端口、参数和局部约束，再用 Python 对象和运算符构造层次拓扑。编译器
-将已支持的电学子集降低为原生 SPICE 元件或生成的 Verilog-A。
+Pyrilog 是一个以 Python 为宿主语言的类型化 relation 建模与编译前端。模型作者
+声明器件端口、参数、局部关系和层次拓扑；编译器将当前支持的电热子集精确降低为
+原生 SPICE 或 Verilog-A，并保留可审计的 manifest。
 
 ```text
 Python Device + relation + typed topology
                   |
                   v
-       flatten, validate, classify
-             /             \
-            v               v
-  native SPICE R/C/L/V/I   generated Verilog-A
-             \             /
-              v           v
-                ngspice
+       validate, flatten or keep hierarchy
+             /                    \
+            v                      v
+    native SPICE              generated Verilog-A
+             \                    /
+              v                  v
+                OpenVAF + ngspice
 ```
 
-Pyrilog 1.0.0 是第一个可执行编译切片，不是已完成的通用光电热求解器。
-光学复包络、热网络、离散控制调度和输出重构仍在路线图中；对这些能力，
-当前编译器会明确报错，不生成静默近似。
+Pyrilog 是多保真仿真研究的基础设施，不是研究贡献本身。长期目标是让同一个带
+物理语义的模型产生快速降阶版本和高保真 reference 版本，并追踪适用域、误差与
+升级原因。1.1.0 尚未实现自动降阶、误差传播或 reference 调度，不应据此宣称
+仿真结果已经具有工程置信度。
+
+## 1.1.0 更新
+
+- 电、热保守节点支持任意 `|` 链、后续 `|=` 和 node-node union。
+- 显式 `tnode(C=...)`、热容、功率注入、固定温度和集总电热 MNA 已可执行。
+- 自定义 relation 可严格匹配原生 `R/C/L/V/I/E/G`。
+- 标准库支持原生 `R/C/L/V/I/E/G/D/Q`。
+- 多端电流 relation 可生成 Verilog-A contribution。
+- 原生电复合图可保留为 SPICE `.subckt`；其他受支持模型走 flat lowering。
+- `localparam`、稳定实例 ID、节点映射和热 lump 信息进入 manifest。
+- 当前全量回归快照为 108 项。
 
 ## 快速开始
 
-需要 Python 3.11 或更高版本。
+需要 Python 3.11 或更高版本：
 
 ```bash
 python -m venv .venv
@@ -32,7 +44,7 @@ python -m pip install -e .
 python examples/quickstart.py
 ```
 
-`quickstart.py` 只使用原生 SPICE 元件，不需要外部仿真器就能生成网表和 manifest。
+`quickstart.py` 只生成原生 SPICE 网表和 manifest，不要求外部仿真器。
 
 ```python
 from pyrilog import Circuit, V, kohm
@@ -45,16 +57,14 @@ with Circuit() as circuit:
     lower = Resistor(resistance=1 * kohm)
 
     source.p | upper.p
-    upper.n | lower.p
-    circuit.GND |= (source.n, lower.n)
+    midpoint = upper.n | lower.p
+    circuit.GND |= source.n | lower.n
 ```
 
-`port_a | port_b` 创建匿名节点，`node |= ports` 将端口并入已有节点。
-`Circuit.GND` 是内置电参考节点，后端稳定映射到 SPICE `0`。
+`|` 返回节点对象，`|=` 扩展或合并保守节点。`Circuit.GND` 和
+`Circuit.AMBIENT` 是惰性、每图独立的内置边界。
 
 ## 自定义器件
-
-器件只声明接口、参数和必须满足的关系：
 
 ```python
 from pyrilog import A, V, Device, eport
@@ -63,64 +73,67 @@ from pyrilog import A, V, Device, eport
 class Conductance(Device):
     p = eport()
     n = eport()
-    conductance = 1e-3 * (A / V)
+    conductance = 1e-3 * A / V
+
     relation = (
         p.i + n.i == 0,
-        p.i.i == conductance * (p.v - n.v),
+        p.i == conductance * (p.v - n.v),
     )
 ```
 
-Pyrilog 对类体做一次反射：数值和带单位的类属性成为参数，`eport()` 成为类型端口，
-`relation` 成为局部约束。构造参数可覆盖默认值，而自动注册、稳定层次 ID、量纲检查
-和后端生成由框架处理。
-
-端口的默认 flow 视图以“流出器件”为正；`.o` 是同向视图，`.i` 是反号的
-“流入器件”视图。因此 `p.i.i` 表示从 `p` 端流入器件的电流。
+器件类只声明接口、参数和关系。自动注册、稳定命名、拓扑检查、量纲检查和后端
+选择由框架完成。当前版本仍要求模型显式写出器件端口 flow 守恒；下一版的自动
+闭合规则见 [docs/roadmap.md](docs/roadmap.md)。
 
 ## 当前能力
 
-| 能力 | 1.0.0 状态 |
+| 能力 | 1.1.0 状态 |
 | --- | --- |
-| `Device`、类体参数反射、`eport()`、局部 `relation` | 已实现 |
-| `Circuit` 自动注册、类型拓扑、失败连接原子回滚 | 已实现 |
-| Pint 单位、参数范围和关系量纲检查 | 已实现 |
-| 层次复合器件、内部节点、稳定层次 ID 和电学展平 | 已实现 |
-| 标准 `R/C/L/V/I` 原生 SPICE lowering | 已实现 |
-| 二端实数电学关系的 Verilog-A lowering | 已实现 |
-| `ddt(...)` 在已支持的二端关系中生成 Verilog-A | 已实现 |
-| OpenVAF-reloaded + ngspice 工作点/瞬态验证 | 已验证的开发工具链 |
-| `oport()`、热 `T/P/TP`、Controller/Feedback | 仅前端建图 |
-| 光学复数标量化、热网络 lowering、离散调度 | 未实现 |
-| `delay`、Output CSV 重构、interactive Session | 未实现 |
-| 自动归一化、结构秩与 Jacobian 病态诊断 | 目标架构，未实现 |
+| `Device`、参数反射、`param`、`localparam`、局部 relation | 已实现 |
+| 电/热类型拓扑、union-find 连接、GND/AMBIENT | 已实现 |
+| Pint 单位、范围和 relation 量纲检查 | 已实现 |
+| 原生 SPICE `R/C/L/V/I/E/G/D/Q` | 已实现 |
+| relation 自动分类 `R/C/L/V/I/E/G` | 已实现 |
+| 二端和多端显式实数 relation 到 Verilog-A | 已实现 |
+| `ddt(...)`、OpenVAF OSDI、ngspice OP/transient | 已验证 |
+| 纯原生电复合图到 `.subckt` | 已实现 |
+| 集总热节点与电热 MNA | 已实现并验证 |
+| 光端口和复表达式 | 仅前端；lowering 未实现 |
+| `state`、`delay`、`piecewise` | 仅前端；后端明确拒绝 |
+| Controller/Feedback、Output 重建、interactive Session | 仅前端或未实现 |
+| 自动归一化、一般秩分析、通用隐式 residual | 未实现 |
+| 自动降阶、误差传播、reference 升级 | 研究路线，未实现 |
+
+编译器对不支持能力抛出 `BackendCapabilityError`，不静默插入寄生、丢弃相位
+或生成未经说明的近似。
 
 ## 验证
 
-运行回归：
-
 ```bash
-python -m unittest discover -s tests -v
-```
-
-纯 Python 前端和原生网表测试可直接运行。端到端 Verilog-A 测试还需要：
-
-- `openvaf-r` 可在 `PATH` 中找到；
-- 支持 OSDI `pre_osdi` 的 ngspice 可在 `PATH` 中找到。
-
-```bash
+python -m unittest discover -s tests -q
 PYTHONPATH=. python examples/compiler_smoke.py
 ```
 
-该示例会生成 SPICE 网表、manifest、Verilog-A、OSDI 和 ngspice raw 文件。
+完整端到端测试需要：
+
+- `openvaf-r` 可在 `PATH` 中找到；
+- 支持 OSDI `pre_osdi` 的 ngspice；
+- 电域跨后端测试还会在本机存在 Xyce 时运行。
+
+工具链、数值基准和验证边界见 [docs/verification.md](docs/verification.md)。
 
 ## 阅读路线
 
-1. 运行 [`examples/quickstart.py`](examples/quickstart.py)，先看清器件实例与节点拓扑。
-2. 阅读 [`WHITEPAPER.md`](WHITEPAPER.md)，理解 relation 如何进入 MNA/DAE 与后端分类。
-3. 运行 [`examples/compiler_smoke.py`](examples/compiler_smoke.py)，检查生成的网表和 Verilog-A。
-4. 将 [`examples/modeling_language_v1.py`](examples/modeling_language_v1.py) 作为完整语法参考；
-   其中光、热和 Controller 部分展示前端语义，不代表当前后端可执行。
+1. [WHITEPAPER.md](WHITEPAPER.md)：项目边界和编译方法。
+2. [docs/architecture/docs_graph.md](docs/architecture/docs_graph.md)：按设计、语法、
+   物理、编译和能力状态阅读。
+3. [examples/modeling_language_v1.py](examples/modeling_language_v1.py)：下一版候选语法，
+   明确不是当前可运行示例。
+4. [docs/roadmap.md](docs/roadmap.md)：已确认但尚未实现的接口收敛方向。
+5. [source/](source/)：EPHIC、CMT 和 Verilog-A 紧凑模型研究材料。
+
+历史文档保存在 `docs/archive/`，其中部分语义已经过时，不是当前能力真相源。
 
 ## License
 
-MIT。详见 [`LICENSE`](LICENSE)。
+MIT。详见 [LICENSE](LICENSE)。

@@ -47,6 +47,17 @@ def external(default: Any) -> ParameterSpec:
 
 
 @dataclass(frozen=True)
+class LocalParameterSpec:
+    default: Any
+
+
+def localparam(default: Any) -> LocalParameterSpec:
+    if not is_quantity_value(default):
+        raise TypeError("localparam() expects a numeric or quantity value")
+    return LocalParameterSpec(default)
+
+
+@dataclass(frozen=True)
 class InternalSpec:
     initial: Any
 
@@ -56,6 +67,7 @@ def val(initial: Any) -> InternalSpec:
 
 
 internal = val
+state = val
 
 
 @dataclass(frozen=True)
@@ -103,6 +115,23 @@ class BoundParameter(Expr):
 
     def __repr__(self) -> str:
         return f"{self.owner.stable_id}.{self.symbol.name}"
+
+
+class LocalParameterSymbol(Expr):
+    def __init__(self, name: str, spec: LocalParameterSpec):
+        self.name = name
+        self.spec = spec
+
+    def __get__(self, instance: Any | None, owner: type[Any]):
+        if instance is None:
+            return self
+        return as_quantity(self.spec.default)
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        raise ParameterError(f"localparam {self.name} is read-only")
+
+    def __repr__(self) -> str:
+        return self.name
 
 
 class InternalSymbol(Expr):
@@ -264,7 +293,11 @@ class PortQuantity(Expr):
 
 
 class FlowQuantity(PortQuantity):
-    """One signed flow with inward/outward expression views."""
+    """An electrical current whose positive direction is into the device."""
+
+
+class ThermalFlowQuantity(PortQuantity):
+    """The existing thermal-power flow views, pending thermal API migration."""
 
     @property
     def i(self) -> Expr:
@@ -307,9 +340,12 @@ class PortTemplate:
         raise AttributeError("i")
 
     @property
-    def o(self) -> PortQuantity:
-        self._require("optical", "o")
-        return PortQuantity(self, "o")
+    def o(self) -> Expr:
+        if self.domain == "electrical":
+            return -FlowQuantity(self, "i")
+        if self.domain == "optical":
+            return PortQuantity(self, "o")
+        raise AttributeError("o")
 
     @property
     def t(self) -> PortQuantity:
@@ -319,14 +355,14 @@ class PortTemplate:
     @property
     def p(self) -> PortQuantity:
         self._require("thermal", "p")
-        return FlowQuantity(self, "p")
+        return ThermalFlowQuantity(self, "p")
 
     def _require(self, domain: str, quantity: str) -> None:
         if self.domain != domain:
             raise AttributeError(quantity)
 
-    def __or__(self, other: PortTemplate | BoundPort):
-        return connect_ports(self, other)
+    def __or__(self, other: PortTemplate | BoundPort | Node):
+        return connect_endpoints(self, other)
 
     def __repr__(self) -> str:
         return self.name or f"<{self.domain}-port>"
@@ -353,7 +389,9 @@ class BoundPort:
         raise AttributeError("i")
 
     @property
-    def o(self) -> PortQuantity:
+    def o(self) -> Expr:
+        if self.domain == "electrical":
+            return -FlowQuantity(self, "i")
         return self._quantity("optical", "o")
 
     @property
@@ -364,25 +402,20 @@ class BoundPort:
     def p(self) -> PortQuantity:
         if self.domain != "thermal":
             raise AttributeError("p")
-        return FlowQuantity(self, "p")
+        return ThermalFlowQuantity(self, "p")
 
     def _quantity(self, domain: str, quantity: str) -> PortQuantity:
         if self.domain != domain:
             raise AttributeError(quantity)
         return PortQuantity(self, quantity)
 
-    def __or__(self, other: PortTemplate | BoundPort):
-        return connect_ports(self, other)
+    def __or__(self, other: PortTemplate | BoundPort | Node):
+        return connect_endpoints(self, other)
 
-    def __ior__(self, others: BoundPort | Iterable[BoundPort]):
+    def __ior__(self, others: BoundPort | Node | Iterable[BoundPort | Node]):
         if self.domain == "optical":
             raise TopologyError("optical ports only support binary '|' connections")
-        if isinstance(self.connection, Node):
-            self.connection |= others
-            return self.connection
-        node = Node(self.domain)
-        _register_inferred_node(node, (self, *_port_batch(others)))
-        return node
+        return _connect_conservative((self, *_endpoint_batch(others)))
 
     def __repr__(self) -> str:
         return f"{self.owner.stable_id}.{self.name}"
@@ -414,11 +447,11 @@ class Node:
         if domain not in {"electrical", "thermal"}:
             raise ValueError(f"invalid node domain: {domain}")
         if domain == "thermal":
-            if C is not None and as_quantity(C).dimensions != (J / K).dimensions:
+            if C is not None and _value_dimensions(C) != (J / K).dimensions:
                 raise ParameterError("thermal node C must have heat-capacity dimensions")
-            if T is not None and as_quantity(T).dimensions != K.dimensions:
+            if T is not None and _value_dimensions(T) != K.dimensions:
                 raise ParameterError("thermal node T must have temperature dimensions")
-            if P is not None and as_quantity(P).dimensions != W.dimensions:
+            if P is not None and _value_dimensions(P) != W.dimensions:
                 raise ParameterError("thermal node P must have power dimensions")
         self.domain = domain
         self.reference = reference
@@ -429,6 +462,13 @@ class Node:
         self.ports: list[BoundPort | PortTemplate] = []
         self.builder: GraphBuilder | None = None
         self.stable_id = "unbound_node"
+        self._parent: Node = self
+        self._union_members: set[Node] = {self}
+
+    def canonical(self) -> Node:
+        if self._parent is not self:
+            self._parent = self._parent.canonical()
+        return self._parent
 
     @property
     def v(self) -> NodeQuantity:
@@ -449,38 +489,25 @@ class Node:
         return NodeQuantity(self, "p")
 
     @property
-    def initial_temperature(self) -> Quantity | None:
+    def initial_temperature(self) -> Any | None:
         if self.domain != "thermal":
             return None
         if self.initial_T is not None:
+            if isinstance(self.initial_T, Expr):
+                return self.initial_T
             return as_quantity(self.initial_T)
         if self.builder is not None:
             return self.builder.ambient_temperature
         return 300 * K
 
-    def __ior__(self, ports: BoundPort | PortTemplate | Iterable[BoundPort | PortTemplate]):
-        batch = _port_batch(ports)
-        if not batch:
-            raise TopologyError("cannot connect an empty port batch")
-        if any(not isinstance(port, (BoundPort, PortTemplate)) for port in batch):
-            raise TopologyError("a node accepts only ports")
-        endpoint_builder = _builder_for_endpoints(batch)
-        if self.builder is not None and endpoint_builder is not self.builder:
-            raise TopologyError("node and ports belong to different graphs")
-        builder = self.builder or endpoint_builder
-        for port in batch:
-            if port.domain != self.domain:
-                raise TopologyError(f"cannot connect {port.domain} port to {self.domain} node")
-            if port.connection is not None and port.connection is not self:
-                raise TopologyError(f"port {port} is already connected")
-        builder.begin_connections()
-        if self.builder is None:
-            builder.register_node(self)
-        for port in batch:
-            if port not in self.ports:
-                self.ports.append(port)
-                port.connection = self
-        return self
+    def __or__(self, other: BoundPort | PortTemplate | Node):
+        return connect_endpoints(self, other)
+
+    def __ior__(
+        self,
+        endpoints: BoundPort | PortTemplate | Node | Iterable[BoundPort | PortTemplate | Node],
+    ):
+        return _connect_conservative((self, *_endpoint_batch(endpoints)))
 
     def __repr__(self) -> str:
         return self.stable_id
@@ -510,19 +537,17 @@ class _AmbientNode(Node):
     def initial_temperature(self) -> Quantity:
         return self._ambient_builder.ambient_temperature
 
-    def __ior__(self, ports: BoundPort | PortTemplate | Iterable[BoundPort | PortTemplate]):
-        batch = _port_batch(ports)
+    def __ior__(
+        self,
+        endpoints: BoundPort | PortTemplate | Node | Iterable[BoundPort | PortTemplate | Node],
+    ):
+        batch = _endpoint_batch(endpoints)
         if not batch:
-            raise TopologyError("cannot connect an empty port batch")
-        if any(not isinstance(port, (BoundPort, PortTemplate)) for port in batch):
-            raise TopologyError("a node accepts only ports")
-        if _builder_for_endpoints(batch) is not self._ambient_builder:
+            raise TopologyError("cannot connect an empty endpoint batch")
+        if any(endpoint.domain != "thermal" for endpoint in batch):
+            raise TopologyError("cannot connect endpoints from different physical domains")
+        if _builder_for_endpoints((self, *batch)) is not self._ambient_builder:
             raise TopologyError("node and ports belong to different graphs")
-        for port in batch:
-            if port.domain != self.domain:
-                raise TopologyError(f"cannot connect {port.domain} port to {self.domain} node")
-            if port.connection is not None and port.connection is not self:
-                raise TopologyError(f"port {port} is already connected")
         self._ensure_registered()
         return super().__ior__(batch)
 
@@ -545,6 +570,34 @@ class OpticalConnection:
 
     def __repr__(self) -> str:
         return self.stable_id
+
+
+class OpticalNode:
+    """Named helper for one strict binary optical reference-plane link."""
+
+    def __init__(self):
+        self.builder: GraphBuilder | None = None
+        self.connection: OpticalConnection | None = None
+
+    def __ior__(self, ports: BoundPort | PortTemplate | Iterable[BoundPort | PortTemplate]):
+        batch = _port_batch(ports)
+        if len(batch) != 2:
+            raise TopologyError("an optical node accepts exactly two ports")
+        if batch[0].domain != "optical" or batch[1].domain != "optical":
+            raise TopologyError("an optical node accepts only optical ports")
+        builder = _builder_for_endpoints(batch)
+        if self.connection is not None:
+            raise TopologyError("optical node is already connected")
+        if any(port.connection is not None for port in batch):
+            raise TopologyError("an optical port is already connected")
+        builder.begin_connections()
+        connection = OpticalConnection(batch[0], batch[1])
+        builder.register_optical(connection)
+        batch[0].connection = connection
+        batch[1].connection = connection
+        self.builder = builder
+        self.connection = connection
+        return self
 
 
 class GraphBuilder:
@@ -665,22 +718,14 @@ class _DeviceNamespace(dict[str, Any]):
         super().__init__()
         self.builder = GraphBuilder(label)
         self.enabled = enabled
-        self.auto_thermal: dict[str, Any] = {}
 
     def __setitem__(self, key: str, value: Any) -> None:
         if not self.enabled or key.startswith("__") or key == "relation":
             super().__setitem__(key, value)
             return
-        if key in self.auto_thermal:
-            raise TypeError(f"{key} is reserved for the automatic C-driven thermal state")
-        activates_thermal = key == "C" and _is_thermal_capacity(value)
-        if activates_thermal:
-            conflict = next((name for name in ("T", "P", "TP") if name in self), None)
-            if conflict is not None:
-                raise TypeError(
-                    f"{conflict} is reserved when C has heat-capacity dimensions"
-                )
-        if isinstance(value, ParameterSpec):
+        if isinstance(value, LocalParameterSpec):
+            value = LocalParameterSymbol(key, value)
+        elif isinstance(value, ParameterSpec):
             value = ParameterSymbol(key, value)
         elif isinstance(value, InternalSpec):
             value = InternalSymbol(key, value)
@@ -693,15 +738,6 @@ class _DeviceNamespace(dict[str, Any]):
         elif isinstance(value, Node):
             self.builder.register_node(value, member_name=key)
         super().__setitem__(key, value)
-        if activates_thermal and "TP" not in self:
-            temperature = InternalSymbol("T", InternalSpec(300 * K))
-            power = InternalSymbol("P", InternalSpec(0 * W))
-            thermal_port = PortTemplate("thermal", lazy=True)
-            thermal_port.bind_name("TP", self.builder)
-            self.auto_thermal.update(T=temperature, P=power, TP=thermal_port)
-            dict.__setitem__(self, "T", temperature)
-            dict.__setitem__(self, "P", power)
-            dict.__setitem__(self, "TP", thermal_port)
 
 
 class DeviceMeta(type):
@@ -711,6 +747,16 @@ class DeviceMeta(type):
         return _DeviceNamespace(name, enabled)
 
     def __new__(metaclass, name: str, bases: tuple[type, ...], namespace: _DeviceNamespace, **kwargs: Any):
+        inherited_local_parameters = {
+            key
+            for base in bases
+            for key in getattr(base, "_local_parameter_symbols", {})
+        }
+        overridden_local_parameters = inherited_local_parameters & set(namespace)
+        if overridden_local_parameters:
+            raise ParameterError(
+                f"inherited localparams cannot be overridden: {sorted(overridden_local_parameters)}"
+            )
         annotations = namespace.get("__annotations__", {})
         for key, annotation in annotations.items():
             value = namespace.get(key)
@@ -718,38 +764,29 @@ class DeviceMeta(type):
                 isinstance(annotation, str)
                 and annotation.replace("typing.", "").startswith("ClassVar[")
             )
-            if is_classvar and isinstance(value, ParameterSymbol):
+            if is_classvar and isinstance(value, (ParameterSymbol, LocalParameterSymbol)):
                 dict.__setitem__(namespace, key, value.spec.default)
         cls = super().__new__(metaclass, name, bases, dict(namespace))
         parameters: OrderedDict[str, ParameterSymbol] = OrderedDict()
+        local_parameters: OrderedDict[str, LocalParameterSymbol] = OrderedDict()
         internals: OrderedDict[str, InternalSymbol] = OrderedDict()
         ports: OrderedDict[str, PortTemplate] = OrderedDict()
         for base in bases:
             parameters.update(getattr(base, "_parameter_symbols", {}))
+            local_parameters.update(getattr(base, "_local_parameter_symbols", {}))
             internals.update(getattr(base, "_internal_symbols", {}))
             ports.update(getattr(base, "_port_templates", {}))
         for key, value in namespace.items():
             if isinstance(value, ParameterSymbol):
                 parameters[key] = value
+                local_parameters.pop(key, None)
+            elif isinstance(value, LocalParameterSymbol):
+                local_parameters[key] = value
+                parameters.pop(key, None)
             elif isinstance(value, InternalSymbol):
                 internals[key] = value
             elif isinstance(value, PortTemplate):
                 ports[key] = value
-        thermal_enabled = "C" in parameters and _is_thermal_capacity(parameters["C"].spec)
-        local_reserved = {
-            key
-            for key in ("T", "P", "TP")
-            if key in namespace and namespace.get(key) is not namespace.auto_thermal.get(key)
-        }
-        if thermal_enabled and local_reserved:
-            names = ", ".join(sorted(local_reserved))
-            raise TypeError(f"{names} are reserved for the automatic C-driven thermal state")
-        if not thermal_enabled and ports.get("TP") is not None and ports["TP"].lazy:
-            ports.pop("TP")
-            if "T" not in namespace or namespace.get("T") is namespace.auto_thermal.get("T"):
-                internals.pop("T", None)
-            if "P" not in namespace or namespace.get("P") is namespace.auto_thermal.get("P"):
-                internals.pop("P", None)
         relation_value = namespace.get("relation", ())
         if isinstance(relation_value, Relation):
             relations = (relation_value,)
@@ -757,14 +794,8 @@ class DeviceMeta(type):
             relations = tuple(relation_value)
         if any(not isinstance(item, Relation) for item in relations):
             raise TypeError(f"{name}.relation must contain only equality constraints")
-        if thermal_enabled:
-            if not {"T", "P"}.issubset(internals) or "TP" not in ports or not ports["TP"].lazy:
-                raise TypeError("C with heat-capacity dimensions requires automatic T, P, and TP")
-            relations += (
-                ports["TP"].t == internals["T"],
-                parameters["C"] * ddt(internals["T"]) == internals["P"] - ports["TP"].p.o,
-            )
         cls._parameter_symbols = parameters
+        cls._local_parameter_symbols = local_parameters
         cls._internal_symbols = internals
         cls._port_templates = ports
         cls._relations = relations
@@ -778,18 +809,32 @@ class DeviceMeta(type):
             builder.register_device(instance)
         return instance
 
+    def __setattr__(cls, name: str, value: Any) -> None:
+        if name in getattr(cls, "_local_parameter_symbols", {}):
+            raise ParameterError(f"localparam {name} is read-only")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if name in getattr(cls, "_local_parameter_symbols", {}):
+            raise ParameterError(f"localparam {name} is read-only")
+        super().__delattr__(name)
+
 
 class Device(metaclass=DeviceMeta):
     _parameter_symbols: OrderedDict[str, ParameterSymbol]
+    _local_parameter_symbols: OrderedDict[str, LocalParameterSymbol]
     _internal_symbols: OrderedDict[str, InternalSymbol]
     _port_templates: OrderedDict[str, PortTemplate]
     _relations: tuple[Relation, ...]
     _definition: GraphBuilder | None
 
     def __init__(self, **parameters: Any):
-        has_internal_thermal = "TP" in self._port_templates and self._port_templates["TP"].lazy
-        implicit_thermal = {"T"} if has_internal_thermal else set()
-        unknown = set(parameters) - set(self._parameter_symbols) - implicit_thermal
+        immutable = set(parameters) & set(self._local_parameter_symbols)
+        if immutable:
+            raise ParameterError(
+                f"localparams for {type(self).__name__} cannot be overridden: {sorted(immutable)}"
+            )
+        unknown = set(parameters) - set(self._parameter_symbols)
         if unknown:
             raise ParameterError(f"unknown parameters for {type(self).__name__}: {sorted(unknown)}")
         self._builder: GraphBuilder | None = None
@@ -799,6 +844,8 @@ class Device(metaclass=DeviceMeta):
         self._internal_nodes: list[Node] = []
         self._internal_optical_connections: list[OpticalConnection] = []
         self._boundary_nodes: dict[str, Node] = {}
+        self._node_bindings: dict[Node, Node] = {}
+        self._node_metadata_bindings: dict[Node, dict[str, Expr]] = {}
         self._composite_parameter_bindings: dict[str, Expr | BoundParameter] = {}
         self._composite_parent: Device | None = None
         self._ports = {
@@ -808,13 +855,6 @@ class Device(metaclass=DeviceMeta):
         self._internal_initials = {
             name: symbol.spec.initial for name, symbol in self._internal_symbols.items()
         }
-        if has_internal_thermal:
-            initial_temperature = parameters.get("T", _AMBIENT_INITIAL)
-            if initial_temperature is not _AMBIENT_INITIAL:
-                initial_temperature = as_quantity(initial_temperature)
-                if initial_temperature.dimensions != K.dimensions:
-                    raise ParameterError("initial T must have temperature dimensions")
-            self._internal_initials["T"] = initial_temperature
         for name, symbol in self._parameter_symbols.items():
             value = parameters.get(name, symbol.spec.default)
             self._set_parameter(symbol, value)
@@ -862,12 +902,17 @@ class Device(metaclass=DeviceMeta):
             if spec.maximum is not None and not candidate <= as_quantity(spec.maximum):
                 raise ParameterError(f"parameter {symbol.name} is above its maximum")
             value = candidate
-        needs_snapshot = self._children or symbol.name in self._composite_parameter_bindings
+        needs_snapshot = (
+            self._children
+            or self._node_metadata_bindings
+            or symbol.name in self._composite_parameter_bindings
+        )
         snapshot = self._parameter_tree_snapshot() if needs_snapshot else None
         if not preserve_binding:
             self._composite_parameter_bindings.pop(symbol.name, None)
         self._parameter_values[symbol.name] = value
         try:
+            self._refresh_node_metadata()
             for child in self._children:
                 child._refresh_composite_bindings()
         except Exception:
@@ -878,6 +923,14 @@ class Device(metaclass=DeviceMeta):
     def __setattr__(self, name: str, value: Any) -> None:
         ports = self.__dict__.get("_ports", {})
         if name in ports and isinstance(value, Node) and ports[name] in value.ports:
+            return
+        members = self.__dict__.get("_members", {})
+        if (
+            name in members
+            and isinstance(members[name], Node)
+            and isinstance(value, Node)
+            and members[name].canonical() is value.canonical()
+        ):
             return
         super().__setattr__(name, value)
 
@@ -900,6 +953,22 @@ class Device(metaclass=DeviceMeta):
         if definition is None:
             return
         child_map: dict[Device, Device] = {}
+        descendant_node_map: dict[Node, Node] = {}
+
+        def map_child_tree(template: Device, child: Device) -> None:
+            child_map[template] = child
+            if len(template._children) != len(child._children):
+                raise TopologyError("composite clone changed its child-device structure")
+            if len(template._internal_nodes) != len(child._internal_nodes):
+                raise TopologyError("composite clone changed its internal-node structure")
+            descendant_node_map.update(
+                zip(template._internal_nodes, child._internal_nodes, strict=True)
+            )
+            for template_descendant, child_descendant in zip(
+                template._children, child._children, strict=True
+            ):
+                map_child_tree(template_descendant, child_descendant)
+
         token = _ACTIVE_CIRCUIT.set(None)
         try:
             for template in definition.devices:
@@ -917,23 +986,49 @@ class Device(metaclass=DeviceMeta):
                 child = type(template)(**resolved)
                 child._composite_parent = self
                 child._composite_parameter_bindings = bindings
-                child_map[template] = child
+                map_child_tree(template, child)
                 self._children.append(child)
         finally:
             _ACTIVE_CIRCUIT.reset(token)
 
         node_map: dict[Node, Node] = {}
         for template in definition.nodes:
+            descendant_node = descendant_node_map.get(template)
+            if descendant_node is not None:
+                node_map[template] = descendant_node
+                self._internal_nodes.append(descendant_node)
+                continue
+            values = {}
+            bindings: dict[str, Expr] = {}
+            for field, value in (
+                ("C", template.C),
+                ("T", template.initial_T),
+                ("P", template.external_P),
+            ):
+                if isinstance(value, Expr):
+                    bindings[field] = value
+                    try:
+                        values[field] = _resolve_composite_value(value, self)
+                    except ParameterError:
+                        values[field] = value
+                else:
+                    values[field] = value
             node = Node(
                 template.domain,
                 reference=template.reference,
                 fixed=template.fixed,
-                C=template.C,
-                T=template.initial_T,
-                P=template.external_P,
+                C=values["C"],
+                T=values["T"],
+                P=values["P"],
             )
             node_map[template] = node
+            self._node_metadata_bindings[node] = bindings
             self._internal_nodes.append(node)
+        for template, node in node_map.items():
+            template_root = template.canonical()
+            if template_root is not template:
+                _union_nodes(node_map[template_root], node)
+        self._node_bindings = node_map
 
         boundary_templates = {template: name for name, template in self._port_templates.items()}
 
@@ -995,9 +1090,22 @@ class Device(metaclass=DeviceMeta):
                     _resolve_composite_value(expression, self._composite_parent),
                     preserve_binding=True,
                 )
+            self._refresh_node_metadata()
             return
         for child in self._children:
             child._refresh_composite_bindings()
+
+    def _refresh_node_metadata(self) -> None:
+        for node, bindings in self._node_metadata_bindings.items():
+            for field, expression in bindings.items():
+                value = _resolve_composite_value(expression, self)
+                if field == "C":
+                    node.C = value
+                elif field == "T":
+                    node.initial_T = value
+                else:
+                    node.external_P = value
+            _validate_node_union_group(node)
 
     def _parameter_tree_snapshot(self):
         snapshot = [
@@ -1005,6 +1113,10 @@ class Device(metaclass=DeviceMeta):
                 self,
                 dict(self._parameter_values),
                 dict(self._composite_parameter_bindings),
+                {
+                    node: (node.C, node.initial_T, node.external_P)
+                    for node in self._node_metadata_bindings
+                },
             )
         ]
         for child in self._children:
@@ -1013,11 +1125,15 @@ class Device(metaclass=DeviceMeta):
 
     @staticmethod
     def _restore_parameter_tree(snapshot) -> None:
-        for device, values, bindings in snapshot:
+        for device, values, bindings, node_metadata in snapshot:
             device._parameter_values.clear()
             device._parameter_values.update(values)
             device._composite_parameter_bindings.clear()
             device._composite_parameter_bindings.update(bindings)
+            for node, (capacity, temperature, power) in node_metadata.items():
+                node.C = capacity
+                node.initial_T = temperature
+                node.external_P = power
 
 
 class _ControllerNamespace(dict[str, Any]):
@@ -1271,7 +1387,7 @@ def enode(*, reference: bool = False) -> Node:
     return node
 
 
-def tnode(*, C: Any | None = None, T: Any | None = None, P: Any | None = None, fixed: bool = False) -> Node:
+def tnode(*, C: Any, T: Any | None = None, P: Any | None = None, fixed: bool = False) -> Node:
     node = Node("thermal", fixed=fixed, C=C, T=T, P=P)
     builder = _ACTIVE_CIRCUIT.get()
     if builder is not None:
@@ -1279,27 +1395,36 @@ def tnode(*, C: Any | None = None, T: Any | None = None, P: Any | None = None, f
     return node
 
 
-def connect_ports(left: PortTemplate | BoundPort, right: PortTemplate | BoundPort):
-    if not isinstance(left, (PortTemplate, BoundPort)) or not isinstance(right, (PortTemplate, BoundPort)):
-        raise TopologyError("'|' connects two ports")
+def onode() -> OpticalNode:
+    return OpticalNode()
+
+
+def connect_endpoints(
+    left: PortTemplate | BoundPort | Node,
+    right: PortTemplate | BoundPort | Node,
+):
+    allowed = (PortTemplate, BoundPort, Node)
+    if not isinstance(left, allowed) or not isinstance(right, allowed):
+        raise TopologyError("'|' connects ports or nodes")
     if left is right:
-        raise TopologyError("a port cannot connect to itself")
+        raise TopologyError("an endpoint cannot connect to itself")
     if left.domain != right.domain:
-        raise TopologyError(f"cannot connect {left.domain} and {right.domain} ports")
-    if left.connection is not None or right.connection is not None:
-        raise TopologyError("a port is already connected")
-    builder = _builder_for_endpoints((left, right))
-    builder.begin_connections()
+        raise TopologyError(f"cannot connect {left.domain} and {right.domain} endpoints")
     if left.domain == "optical":
+        if not isinstance(left, (PortTemplate, BoundPort)) or not isinstance(
+            right, (PortTemplate, BoundPort)
+        ):
+            raise TopologyError("optical links connect exactly two optical ports")
+        if left.connection is not None or right.connection is not None:
+            raise TopologyError("an optical port is already connected")
+        builder = _builder_for_endpoints((left, right))
+        builder.begin_connections()
         connection = OpticalConnection(left, right)
         builder.register_optical(connection)
         left.connection = connection
         right.connection = connection
         return connection
-    node = Node(left.domain)
-    builder.register_node(node)
-    node |= (left, right)
-    return node
+    return _connect_conservative((left, right))
 
 
 def _port_batch(ports: Any) -> tuple[Any, ...]:
@@ -1311,22 +1436,157 @@ def _port_batch(ports: Any) -> tuple[Any, ...]:
         raise TopologyError("expected a port or iterable of ports") from error
 
 
-def _register_inferred_node(node: Node, ports: tuple[BoundPort, ...]) -> None:
-    node |= ports
+def _endpoint_batch(endpoints: Any) -> tuple[Any, ...]:
+    if isinstance(endpoints, (BoundPort, PortTemplate, Node)):
+        return (endpoints,)
+    try:
+        return tuple(endpoints)
+    except TypeError as error:
+        raise TopologyError("expected a node, port, or iterable of endpoints") from error
 
 
-def _builder_for_endpoints(endpoints: Iterable[PortTemplate | BoundPort]) -> GraphBuilder:
+def _connect_conservative(
+    endpoints: Iterable[BoundPort | PortTemplate | Node],
+) -> Node:
+    batch = tuple(endpoints)
+    if len(batch) < 2:
+        raise TopologyError("a conservative connection requires at least two endpoints")
+    if any(not isinstance(item, (BoundPort, PortTemplate, Node)) for item in batch):
+        raise TopologyError("a conservative connection accepts only ports or nodes")
+    domains = {item.domain for item in batch}
+    if len(domains) != 1:
+        raise TopologyError("cannot connect endpoints from different physical domains")
+    domain = next(iter(domains))
+    if domain == "optical":
+        raise TopologyError("optical ports only support strict binary links")
+
+    nodes: list[Node] = []
+    ports: list[BoundPort | PortTemplate] = []
+    for endpoint in batch:
+        if isinstance(endpoint, Node):
+            node = endpoint.canonical()
+            if node not in nodes:
+                nodes.append(node)
+        else:
+            ports.append(endpoint)
+            if isinstance(endpoint.connection, Node):
+                node = endpoint.connection.canonical()
+                if node not in nodes:
+                    nodes.append(node)
+            elif endpoint.connection is not None:
+                raise TopologyError(f"port {endpoint} already belongs to a non-node connection")
+
+    builder = _builder_for_endpoints(batch)
+    if not nodes:
+        root = Node(domain)
+        nodes.append(root)
+    root = _choose_union_root(nodes)
+    for node in nodes:
+        if node is not root:
+            _validate_node_union(root, node)
+    if domain == "thermal":
+        _validate_thermal_member_temperatures(
+            member
+            for node in nodes
+            for member in node._union_members
+        )
+    builder.begin_connections()
+    if root not in builder.nodes:
+        builder.register_node(root)
+    for node in nodes:
+        if node is not root:
+            _union_nodes(root, node)
+    root = root.canonical()
+    for port in ports:
+        if port not in root.ports:
+            root.ports.append(port)
+        port.connection = root
+    return root
+
+
+def _choose_union_root(nodes: list[Node]) -> Node:
+    return max(
+        nodes,
+        key=lambda node: (
+            int(node.reference or node.fixed),
+            int(node.builder is not None),
+            -nodes.index(node),
+        ),
+    )
+
+
+def _union_nodes(preferred: Node, other: Node) -> Node:
+    left = preferred.canonical()
+    right = other.canonical()
+    if left is right:
+        return left
+    _validate_node_union(left, right)
+    if right.reference or right.fixed:
+        left, right = right, left
+    right._parent = left
+    left._union_members.update(right._union_members)
+    right._union_members.clear()
+    if left.builder is None:
+        left.builder = right.builder
+    for port in tuple(right.ports):
+        if port not in left.ports:
+            left.ports.append(port)
+        port.connection = left
+    right.ports.clear()
+    return left
+
+
+def _validate_node_union(left: Node, right: Node) -> None:
+    left = left.canonical()
+    right = right.canonical()
+    if left is right:
+        return
+    if left.domain != right.domain:
+        raise TopologyError("cannot merge nodes from different physical domains")
+    if left.builder is not None and right.builder is not None and left.builder is not right.builder:
+        raise TopologyError("cannot merge nodes from different graphs")
+    if left.domain == "thermal":
+        _validate_thermal_member_temperatures(
+            (*left._union_members, *right._union_members)
+        )
+
+
+def _validate_node_union_group(node: Node) -> None:
+    root = node.canonical()
+    if root.domain == "thermal":
+        _validate_thermal_member_temperatures(root._union_members)
+
+
+def _validate_thermal_member_temperatures(nodes: Iterable[Node]) -> None:
+    explicit: Quantity | None = None
+    for node in nodes:
+        if node.initial_T is None and not node.fixed:
+            continue
+        temperature = node.initial_temperature
+        if isinstance(temperature, Expr):
+            continue
+        temperature = as_quantity(temperature)
+        if explicit is None:
+            explicit = temperature
+        elif explicit != temperature:
+            raise TopologyError("cannot ideally merge thermal nodes with different explicit T")
+
+
+def _builder_for_endpoints(
+    endpoints: Iterable[PortTemplate | BoundPort | Node],
+) -> GraphBuilder:
     builders: list[GraphBuilder] = []
     for endpoint in endpoints:
         if isinstance(endpoint, PortTemplate):
             builder = endpoint.builder
-        else:
+        elif isinstance(endpoint, BoundPort):
             builder = endpoint.owner._builder
-        if builder is None:
-            raise TopologyError(f"unregistered port {endpoint}")
-        builders.append(builder)
+        else:
+            builder = endpoint.builder
+        if builder is not None:
+            builders.append(builder)
     if not builders or any(builder is not builders[0] for builder in builders[1:]):
-        raise TopologyError("ports belong to different graphs")
+        raise TopologyError("endpoints belong to different or unregistered graphs")
     return builders[0]
 
 
@@ -1335,10 +1595,19 @@ def _snake_case(name: str) -> str:
 
 
 def _is_thermal_capacity(value: Any) -> bool:
-    candidate = value.default if isinstance(value, ParameterSpec) else value
+    candidate = value.default if isinstance(value, (ParameterSpec, LocalParameterSpec)) else value
     if not is_quantity_value(candidate):
         return False
     return as_quantity(candidate).dimensions == (J / K).dimensions
+
+
+def _value_dimensions(value: Any):
+    if isinstance(value, Expr):
+        dimensions = _declared_symbol_dimensions(value)
+        if dimensions is None:
+            raise ParameterError("node metadata must have statically known dimensions")
+        return dimensions
+    return as_quantity(value).dimensions
 
 
 def _resolve_composite_value(value: Any, parent: Device) -> Quantity:
@@ -1347,10 +1616,19 @@ def _resolve_composite_value(value: Any, parent: Device) -> Quantity:
     if isinstance(value, ParameterSymbol):
         parent_symbol = parent._parameter_symbols.get(value.name)
         if parent_symbol is not value:
+            if parent._composite_parent is not None:
+                return _resolve_composite_value(value, parent._composite_parent)
             raise ParameterError(
                 f"composite parameter {value.name} does not belong to {type(parent).__name__}"
             )
         return _resolve_composite_value(parent._parameter_values[value.name], parent)
+    if isinstance(value, LocalParameterSymbol):
+        parent_symbol = parent._local_parameter_symbols.get(value.name)
+        if parent_symbol is not value:
+            raise ParameterError(
+                f"composite localparam {value.name} does not belong to {type(parent).__name__}"
+            )
+        return as_quantity(value.spec.default)
     if isinstance(value, ConstantExpr):
         return value.value
     if isinstance(value, UnaryExpr) and value.operator == "-":
@@ -1383,6 +1661,8 @@ def _declared_symbol_dimensions(value: Expr):
         return as_quantity(value.symbol.spec.default).dimensions
     if isinstance(value, ParameterSymbol):
         return as_quantity(value.spec.default).dimensions
+    if isinstance(value, LocalParameterSymbol):
+        return as_quantity(value.spec.default).dimensions
     return None
 
 
@@ -1392,7 +1672,7 @@ def _builders_in_expressions(expressions: Iterable[Expr]) -> set[GraphBuilder | 
         for item in walk(expression):
             if isinstance(item, BoundControllerOutput):
                 raise TopologyError("controller outputs cannot be used as feedback inputs")
-            if isinstance(item, (ParameterSymbol, InternalSymbol)):
+            if isinstance(item, (ParameterSymbol, LocalParameterSymbol, InternalSymbol)):
                 builders.add(None)
             elif isinstance(item, (BoundParameter, BoundInternal)):
                 builders.add(item.owner._builder)

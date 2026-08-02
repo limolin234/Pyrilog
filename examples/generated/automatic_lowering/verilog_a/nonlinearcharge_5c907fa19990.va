@@ -1,0 +1,13 @@
+`include "constants.vams"
+`include "disciplines.vams"
+
+module nonlinearcharge_5c907fa19990(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real capacitance = 9.9999999999999998e-13;
+    parameter real nonlinear_capacitance = 1e-13;
+
+    analog begin
+        I(p, n) <+ ddt(((capacitance * (V(p) - V(n))) + (nonlinear_capacitance * pow((V(p) - V(n)), 2))));
+    end
+endmodule

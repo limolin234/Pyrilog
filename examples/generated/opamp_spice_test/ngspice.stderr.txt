@@ -1,0 +1,4 @@
+Note: Starting dynamic gmin stepping
+Warning: singular matrix:  check node n3
+
+Note: Dynamic gmin stepping completed
